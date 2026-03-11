@@ -56,7 +56,7 @@ wifi_ssid: "Your_Home_WiFi_Name"
 wifi_password: "Your_Home_WiFi_Password"
 
 # ESPHome Security
-api_key: "your_generated_api_key_here="
+api_key: "your_generated_api_key_here"
 ota_password: "your_secure_ota_password"
 
 # Fallback Web Server Dashboard Login
