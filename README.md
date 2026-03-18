@@ -1,67 +1,66 @@
-# 💡 ESP8266 ESPHome Streetlight Relay
+# 💡 ESP8266 ESPHome Streetlight Relay (V2.0)
 
-An ultra-reliable, autonomous ESPHome firmware designed to control outdoor streetlights or heavy-duty contactors using an ESP8266 (Wemos D1 Mini). 
-
-Standard smart plugs fail when the internet goes down or power is cut. This firmware is engineered to handle frequent power cuts and network drops smoothly. It relies on exact NTP time and mathematical scheduling to ensure the light *always* recovers to its correct state, even if your home automation server (like Home Assistant) goes completely offline.
+An ultra-reliable, autonomous ESPHome firmware designed to control outdoor streetlights or heavy-duty contactors. This system is engineered to function 100% offline by utilizing a battery-backed hardware clock, ensuring the light schedule remains accurate even during total network failure or frequent power cycles.
 
 ---
 
-## ✨ The Core Philosophy: "Set It and Forget It"
+## ✨ The Core Philosophy: "True Autonomy"
 
-### 🕒 1. The Autonomous, Math-Based Schedule
-Most smart relays rely on a central server to send "Turn On" and "Turn Off" commands. If the power drops at 18:29 and comes back at 18:31, a standard smart plug misses the 18:30 "Turn On" command and stays in the dark all night.
+### 🕒 1. Hardware-Backed Offline Scheduling (DS1307 RTC)
+Standard smart relays lose their sense of time when the internet or power drops. This firmware integrates a **DS1307 Real-Time Clock (RTC)** with a CR2032 backup battery to maintain a "source of truth" for time.
+* **NTP Synchronization:** When online, the ESP8266 periodically synchronizes with Google/NTP servers and pushes the atomic time to the DS1307 hardware using a native sync action.
+* **Offline Resilience:** If the router is off, the ESP8266 reads the hardware clock on boot. It mathematically calculates if it *should* be ON or OFF immediately, ensuring the light is never stuck in the wrong state.
+* **Midnight Crossover:** The logic handles schedules that span across midnight (e.g., ON at 6:30 PM, OFF at 6:00 AM) using minute-since-midnight calculations.
 
-**How this firmware fixes it:**
-Instead of waiting for triggers, this ESP8266 mathematically calculates if it *should* be on whenever it boots up. 
-* It grabs the current time via NTP.
-* It converts the current time and target times into "minutes since midnight".
-* It runs a `lambda` calculation to check if the current time falls within the active window.
-* If the power comes back on at 2:00 AM, the math instantly evaluates to `true`, and the streetlight turns back on immediately.
+### 🎛️ 2. Dynamic Home Assistant Integration
+Unlike static firmware, this version exposes native **Time Picker** entities to Home Assistant.
+* **Flash Persistence:** Changes made via the Home Assistant UI are instantly committed to the ESP8266's internal flash memory (`restore_value: true`). 
+* **Zero-Lag Readout:** A 12-hour formatted text sensor ("Active Schedule") provides instant visual confirmation on your dashboard whenever a time setting is modified.
 
-### 🛜 2. The Fallback Access Point (AP) & Captive Portal
-If your home router dies, you don't lose control of the streetlight. The ESP8266 automatically deploys a fallback network.
-* **The Trigger:** If the Wemos cannot find your home Wi-Fi for exactly 1 minute (`ap_timeout: 1min`), it starts broadcasting its own Wi-Fi network called **`HDz_Relay`**.
-* **The Captive Portal:** When you connect your smartphone to `HDz_Relay`, the Wemos intercepts your phone's internet check and pushes a "Sign in to network" notification to your phone screen. *(Note: Turn OFF Mobile Data on your phone to ensure this prompt appears).*
+### 🛜 3. Fallback Connectivity & Web Server
+If your home automation server is down, the device remains controllable.
+* **`HDz_Relay` Hotspot:** If the Wemos cannot find Wi-Fi for 1 minute, it broadcasts its own password-protected AP.
+* **Local Dashboard:** Includes a secure local Web Server (Port 80) to toggle the relay or manually sync the RTC time from your phone’s browser.
 
-### 🖥️ 3. The Local Fallback Web Server
-Once you tap the "Sign in" notification, you are greeted by a secure, password-protected local Web Server hosted entirely on the ESP8266 chip. From this offline dashboard, you can manually toggle the relay, view live telemetry (Uptime, Signal Strength, Voltage), and click **"Sync time from browser"** to manually push your phone's exact time to the Wemos, fixing the schedule without the internet!
-
-### 🥷 4. Stealth LED Mode
-Outdoor status LEDs attract insects to your weatherproof enclosure. 
-* The onboard blue LED on the Wemos only shines for **90 seconds** on boot, or when the relay changes state. 
-* After 90 seconds, it goes completely dark. 
-* If the Wi-Fi connection drops, the LED will wake up and blink for 90 seconds to warn you before going back to sleep.
+### 🥷 4. Stealth LED & Diagnostics
+* **LED Timeout:** The onboard status LED remains active only for **90 seconds** after boot or a state change to prevent attracting insects to the enclosure.
+* **Live Telemetry:** Monitors Signal Strength (RSSI), Uptime (fixed for 32-bit overflow), and DC Supply Voltage (VCC).
 
 ---
 
 ## 🛠️ Hardware & Pinout
 
-This project was built using a **Wemos D1 Mini** driving a standard 5V Relay module. Because LED streetlight drivers have massive inrush current, the 5V relay is **only** used to switch the magnetic coil of a heavy-duty 220V AC Contactor. 
-
 | Component | ESP8266 Pin | Notes |
 | :--- | :--- | :--- |
-| **Relay Control** | `GPIO4` (D2) | Triggers the 5V relay module (which triggers the contactor). |
-| **Manual Button** | `GPIO12` (D6) | Connect a momentary push button between D6 and GND for physical override. |
-| **Status LED** | `GPIO2` (D4) | Internal Wemos LED (Inverted). |
+| **Relay Control** | `GPIO4` (D2) | High-level trigger for 5V relay (Switching 220V Contactor). |
+| **I2C SDA** | `GPIO14` (D5) | Data line for DS1307 RTC Module. |
+| **I2C SCL** | `GPIO5` (D1) | Clock line for DS1307 RTC Module. |
+| **Manual Button** | `GPIO12` (D6) | Momentary push button with 50ms software debounce. |
+| **Status LED** | `GPIO2` (D4) | Internal Wemos LED (Inverted logic). |
+
+---
+
+## 🔧 Hardware Modification Note
+To ensure a **10-year battery life** for the DS1307 RTC when using a standard non-rechargeable CR2032 battery, the **charging resistor (201)** on the "Tiny RTC" module was removed. This prevents the 5V rail from attempting to charge the lithium cell, preventing leakage and premature failure.
 
 ---
 
 ## 🔐 Required Secrets Configuration
 
-To keep your network secure, all passwords have been moved to variables. You must add the following keys to your ESPHome `secrets.yaml` file before compiling:
+Ensure your `secrets.yaml` contains the following keys before compiling:
 
 ```yaml
-# Your Main Home Wi-Fi Network
-wifi_ssid: "Your_Home_WiFi_Name"
-wifi_password: "Your_Home_WiFi_Password"
+# WiFi Configuration
+wifi_ssid: "Your_SSID"
+wifi_password: "Your_Password"
 
-# ESPHome Security
-api_key: "your_generated_api_key_here"
-ota_password: "your_secure_ota_password"
+# Security
+api_key: "your_generated_api_key"
+ota_password: "your_ota_password"
 
-# Fallback Web Server Dashboard Login
+# Local Web Server Dashboard
 web_username: "admin"
-web_password: "A_Secure_Password"
+web_password: "Your_Secure_Password"
 
-# Hotspot Password (for the HDz_Relay network)
-ap_password: "12345678"
+# Hotspot Recovery
+ap_password: "Your_AP_Password"

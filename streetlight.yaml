@@ -1,28 +1,41 @@
-substitutions:
-  turn_on_hour: "18"
-  turn_on_min: "30"
-  turn_off_hour: "6"
-  turn_off_min: "0"
+# -----------------------------------------------------------------------------------
+# PROJECT: ESP8266 ESPHome Streetlight Relay
+# HARDWARE: ESP8266 (Wemos D1 Mini), DS1307 RTC, Single Channel Relay
+# FEATURES: 12h-Format UI, Flash-Persistent Schedule, Manual Override, Status Stealth LED
+# -----------------------------------------------------------------------------------
 
 esphome:
   name: "streetlight"
   friendly_name: Single Relay ESP8266
+  
   on_boot:
-    priority: -10
+    priority: -10  # Runs after components initialize, but before WiFi starts
     then:
-      # Start the 90-second LED timer as soon as it gets power
+      # Wake up the status LED timer
       - script.execute: led_status_timer
+      
+      # CRITICAL: Wait for the battery-backed RTC to provide time
+      # This ensures the relay state is correct even if WiFi is down
       - wait_until:
-          lambda: 'return id(sntp_time).now().is_valid();'
+          lambda: 'return id(rtc_time).now().is_valid();'
+      
+      # Refresh all dashboard readouts immediately on boot
+      - component.update: schedule_readout
+      - component.update: uptime_raw
+      - component.update: uptime_display
+      
+      # OFFLINE-SAFE RELAY LOGIC: Checks the clock and sets relay state on boot
       - if:
           condition:
             lambda: |-
-              auto time = id(sntp_time).now();
+              auto time = id(rtc_time).now();
               int current_mins = time.hour * 60 + time.minute;
-              int on_mins = ${turn_on_hour} * 60 + ${turn_on_min};
-              int off_mins = ${turn_off_hour} * 60 + ${turn_off_min};
               
-              if (on_mins >= off_mins) {
+              // Pull saved settings from flash memory
+              int on_mins = id(turn_on_time).hour * 60 + id(turn_on_time).minute;
+              int off_mins = id(turn_off_time).hour * 60 + id(turn_off_time).minute;
+              
+              if (on_mins >= off_mins) { // Handle schedule crossing midnight
                 return (current_mins >= on_mins || current_mins < off_mins);
               } else {
                 return (current_mins >= on_mins && current_mins < off_mins);
@@ -35,95 +48,76 @@ esphome:
 esp8266:
   board: d1_mini
 
+# I2C Bus setup for the DS1307 RTC module
+i2c:
+  sda: GPIO14 # Pin D5
+  scl: GPIO5  # Pin D1
+  scan: true
+
+# TIME INPUTS: These show up as Time Pickers in Home Assistant
+datetime:
+  - platform: template
+    type: time
+    name: "Turn On Time"
+    id: turn_on_time
+    optimistic: yes
+    restore_value: true # Saves change to Flash memory immediately
+    initial_value: "18:30:00"
+    on_value:
+      then:
+        - component.update: schedule_readout # Update the 12h text sensor instantly
+
+  - platform: template
+    type: time
+    name: "Turn Off Time"
+    id: turn_off_time
+    optimistic: yes
+    restore_value: true # Saves change to Flash memory immediately
+    initial_value: "06:00:00"
+    on_value:
+      then:
+        - component.update: schedule_readout # Update the 12h text sensor instantly
+
 time:
+  # 1. NETWORK TIME: Syncs the system time when internet is available
   - platform: sntp
     id: sntp_time
     timezone: "Asia/Kolkata"
+    on_time_sync:
+      then:
+        # Silently update the DS1307 hardware clock with accurate NTP time
+        - ds1307.write_time:
+            id: rtc_time
+
+  # 2. HARDWARE CLOCK: The master time source for offline operation
+  - platform: ds1307
+    id: rtc_time
+    timezone: "Asia/Kolkata"
+    update_interval: 15min
     on_time:
+      # Checks the schedule at the start of every minute
       - seconds: 0
-        minutes: ${turn_on_min}
-        hours: ${turn_on_hour}
+        minutes: '*'
+        hours: '*'
         then:
-          - switch.turn_on: relay_1
-      - seconds: 0
-        minutes: ${turn_off_min}
-        hours: ${turn_off_hour}
-        then:
-          - switch.turn_off: relay_1
+          - lambda: |-
+              auto current = id(rtc_time).now();
+              if (current.hour == id(turn_on_time).hour && current.minute == id(turn_on_time).minute) {
+                id(relay_1).turn_on();
+              } 
+              else if (current.hour == id(turn_off_time).hour && current.minute == id(turn_off_time).minute) {
+                id(relay_1).turn_off();
+              }
 
-button:
-  - platform: restart
-    name: "Restart Device"
-    id: restart_device
-
-# --- The 90-Second Stealth Timer ---
-script:
-  - id: led_status_timer
-    mode: restart # If an event happens while running, the 90s restarts
-    then:
-      - delay: 90s
-      - light.turn_off: wemos_led
-
-web_server:
-  port: 80
-  auth:
-    username: !secret web_username
-    password: !secret web_password
-
-logger:
-api:
-  encryption:
-    key: !secret api_key
-ota:
-  - platform: esphome
-    password: !secret ota_password
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  min_auth_mode: WPA2
-  reboot_timeout: 0s
-  ap:
-    ssid: "HDz_Relay"
-    password: !secret ap_password
-    ap_timeout: 1min 
-  # CORRECTED INDENTATION BELOW
-  on_connect:
-    - script.execute: led_status_timer
-    - if:
-        condition:
-          switch.is_on: relay_1
-        then:
-          - light.turn_on: wemos_led
-        else:
-          - light.turn_off: wemos_led
-  on_disconnect:
-    - script.execute: led_status_timer
-
-captive_portal:
-
-sensor:
-  - platform: wifi_signal
-    name: "WiFi Signal Strength"
-    update_interval: 15min
-
-  - platform: uptime
-    id: uptime_raw
-    internal: true
-    update_interval: 15min
-
-  - platform: adc
-    pin: VCC
-    name: "Supply Voltage"
-    update_interval: 15min
-
+# TEXT SENSORS: For dashboard readouts and system health
 text_sensor:
   - platform: template
     name: "Uptime"
+    id: uptime_display
     icon: "mdi:clock-outline"
     update_interval: 15min
     lambda: |-
-      int sec = id(uptime_raw).state;
+      uint32_t sec = (uint32_t)id(uptime_raw).state;
       int days = sec / 86400;
       int hours = (sec % 86400) / 3600;
       int mins = (sec % 3600) / 60;
@@ -131,6 +125,69 @@ text_sensor:
       sprintf(buffer, "%dd %dh %dm", days, hours, mins);
       return std::string(buffer);
 
+  - platform: template
+    name: "Active Schedule"
+    id: schedule_readout
+    icon: "mdi:calendar-clock"
+    update_interval: never # Only updates when the time pickers change
+    lambda: |-
+      char buffer[64];
+      int on_h = id(turn_on_time).hour;
+      int on_m = id(turn_on_time).minute;
+      int off_h = id(turn_off_time).hour;
+      int off_m = id(turn_off_time).minute;
+      
+      // Convert 24h format to a user-friendly 12h format
+      int on_h12 = (on_h % 12 == 0) ? 12 : (on_h % 12);
+      const char* on_ampm = (on_h >= 12) ? "PM" : "AM";
+      int off_h12 = (off_h % 12 == 0) ? 12 : (off_h % 12);
+      const char* off_ampm = (off_h >= 12) ? "PM" : "AM";
+
+      sprintf(buffer, "ON: %02d:%02d %s | OFF: %02d:%02d %s", 
+              on_h12, on_m, on_ampm, off_h12, off_m, off_ampm);
+      return std::string(buffer);
+
+# SENSORS: Hardware monitoring
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    update_interval: 15min
+  - platform: uptime
+    id: uptime_raw
+    internal: true
+    update_interval: 15min
+  - platform: adc
+    pin: VCC
+    name: "Supply Voltage"
+    update_interval: 15min
+
+# STEALTH TIMER SCRIPT: Manages the 90-second LED timeout
+script:
+  - id: led_status_timer
+    mode: restart # Restarts the 90s timer if a new event occurs
+    then:
+      - delay: 90s
+      - light.turn_off: wemos_led
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s # CRITICAL: Prevents reboot loops if router is offline
+  ap:
+    ssid: "HDz_Relay"
+    password: !secret ap_password
+    ap_timeout: 1min 
+  on_connect:
+    - script.execute: led_status_timer
+    - if:
+        condition:
+          switch.is_on: relay_1
+        then:
+          - light.turn_on: wemos_led
+  on_disconnect:
+    - script.execute: led_status_timer
+
+# PERIPHERALS: LED, Button, and Relay
 light:
   - platform: binary
     id: wemos_led
@@ -151,8 +208,7 @@ interval:
             and:
               - not:
                   wifi.connected:
-              # ONLY blink if the 90-second timer is currently running
-              - script.is_running: led_status_timer
+              - script.is_running: led_status_timer # Blink only during the 90s window
           then:
             - light.toggle: wemos_led
 
@@ -163,6 +219,8 @@ binary_sensor:
       mode: INPUT_PULLUP
       inverted: true
     name: "Manual Button"
+    filters:
+      - delayed_on: 50ms # Debounce mechanical button bounces
     on_press:
       - switch.toggle: relay_1
 
@@ -174,14 +232,32 @@ switch:
     id: relay_1
     restore_mode: ALWAYS_OFF
     on_turn_on:
-      # Wake up LED for 90s to show it turned ON
       - script.execute: led_status_timer
+      - component.update: uptime_raw # Refresh readouts instantly on toggle
+      - component.update: uptime_display
       - if:
           condition:
             wifi.connected:
           then:
             - light.turn_on: wemos_led
     on_turn_off:
-      # Wake up timer (so if Wi-Fi is disconnected, it blinks for 90s)
       - script.execute: led_status_timer
+      - component.update: uptime_raw # Refresh readouts instantly on toggle
+      - component.update: uptime_display
       - light.turn_off: wemos_led
+
+# Standard services
+button:
+  - platform: restart
+    name: "Restart Device"
+    id: restart_device
+web_server:
+  port: 80
+logger:
+api:
+  encryption:
+    key: !secret api_key
+ota:
+  - platform: esphome
+    password: !secret ota_password
+captive_portal:
